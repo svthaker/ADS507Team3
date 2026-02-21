@@ -1,0 +1,195 @@
+USE ads507;
+
+
+-- 0 Safety settings (MyWorkbench safe update mode)
+SET SQL_SAFE_UPDATES = 0;
+
+-- Standardize FLIGHTS keys 
+
+UPDATE flights_clean
+SET
+  origin = UPPER(TRIM(origin)),
+  dest   = UPPER(TRIM(dest)),
+  airline = TRIM(airline);
+
+-- airline_code 
+ALTER TABLE flights_clean
+  ADD COLUMN IF NOT EXISTS airline_code VARCHAR(10);
+
+-- airline_name is airline_code (IATA)
+UPDATE flights_clean
+SET airline_code =
+  CASE
+    WHEN airline LIKE '%Southwest%'   THEN 'WN'
+    WHEN airline LIKE '%Delta%'       THEN 'DL'
+    WHEN airline LIKE '%American%'    THEN 'AA'
+    WHEN airline LIKE '%United%'      THEN 'UA'
+    WHEN airline LIKE '%SkyWest%'     THEN 'OO'
+    WHEN airline LIKE '%JetBlue%'     THEN 'B6'
+    WHEN airline LIKE '%Alaska%'      THEN 'AS'
+    WHEN airline LIKE '%Spirit%'      THEN 'NK'
+    WHEN airline LIKE '%Frontier%'    THEN 'F9'
+    WHEN airline LIKE '%Allegiant%'   THEN 'G4'
+    WHEN airline LIKE '%Hawaiian%'    THEN 'HA'
+    WHEN airline LIKE '%Republic%'    THEN 'YX'
+    WHEN airline LIKE '%Envoy%'       THEN 'MQ'
+    WHEN airline LIKE '%PSA%'         THEN 'OH'
+    WHEN airline LIKE '%Endeavor%'    THEN '9E'
+    WHEN airline LIKE '%Mesa%'        THEN 'YV'
+    WHEN airline LIKE '%ExpressJet%'  THEN 'EV'
+    WHEN airline LIKE '%Air Wisconsin%' THEN 'ZW'
+    ELSE airline_code
+  END;
+
+-- index for quicker joins
+CREATE INDEX IF NOT EXISTS idx_flights_keys
+ON flights_clean (flight_date, airline_code, origin, dest);
+
+-- 2nd dataset WEATHER (from imported monthly file `05-2019`)
+DROP TABLE IF EXISTS weather_clean;
+
+CREATE TABLE weather_clean AS
+SELECT
+  -- robust date parsing
+  CASE
+    WHEN `date` REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+      THEN STR_TO_DATE(`date`, '%Y-%m-%d')
+    WHEN `date` REGEXP '^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$'
+      THEN STR_TO_DATE(`date`, '%m/%d/%Y')
+    ELSE NULL
+  END AS flight_date,
+
+  -- route + airline keys (I had to force VARCHAR so we can index)
+  CAST(UPPER(TRIM(carrier_code))        AS CHAR(10)) AS airline,  -- airline_code from weather dataset
+  CAST(UPPER(TRIM(origin_airport))      AS CHAR(10)) AS origin,
+  CAST(UPPER(TRIM(destination_airport)) AS CHAR(10)) AS dest,
+
+  -- weather features 
+  HourlyDryBulbTemperature_x,
+  HourlyWindSpeed_x,
+  HourlyVisibility_x,
+  HourlyPrecipitation_x
+
+FROM `05-2019`
+WHERE `date` IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_weather_keys
+ON weather_clean (flight_date, airline, origin, dest);
+
+-- agregate weather to airport-day (without this my join did not work)
+DROP TABLE IF EXISTS weather_by_airport_day;
+
+CREATE TABLE weather_by_airport_day AS
+SELECT
+  flight_date,
+  origin AS airport,
+  AVG(HourlyDryBulbTemperature_x)            AS avg_temp,
+  AVG(HourlyWindSpeed_x)                     AS avg_wind,
+  AVG(HourlyVisibility_x)                    AS avg_vis,
+  SUM(COALESCE(HourlyPrecipitation_x, 0.0))  AS total_precip
+FROM weather_clean
+WHERE flight_date IS NOT NULL
+GROUP BY flight_date, origin;
+
+CREATE INDEX IF NOT EXISTS idx_weather_day_airport
+ON weather_by_airport_day (flight_date, airport);
+
+-- 3rd dataset cancelled derived
+
+DROP TABLE IF EXISTS cancelled_2023_clean;
+
+CREATE TABLE cancelled_2023_clean AS
+SELECT
+  STR_TO_DATE(FlightDate, '%Y-%m-%d') AS flight_date,
+  CAST(UPPER(TRIM(Dep_Airport)) AS CHAR(10)) AS origin,
+  CAST(UPPER(TRIM(Arr_Airport)) AS CHAR(10)) AS dest,
+  TRIM(Airline) AS airline_name,
+  CAST(Dep_Delay AS SIGNED) AS departure_delay,
+  CAST(Arr_Delay AS SIGNED) AS arrival_delay,
+  Cancelled,
+  Diverted
+FROM cancelled_diverted_2023
+WHERE FlightDate IS NOT NULL;
+
+ALTER TABLE cancelled_2023_clean
+  ADD COLUMN IF NOT EXISTS airline_code VARCHAR(10);
+
+-- same as above airline mapping 
+UPDATE cancelled_2023_clean
+SET airline_code =
+  CASE
+    WHEN airline_name LIKE '%Southwest%'   THEN 'WN'
+    WHEN airline_name LIKE '%Delta%'       THEN 'DL'
+    WHEN airline_name LIKE '%American%'    THEN 'AA'
+    WHEN airline_name LIKE '%United%'      THEN 'UA'
+    WHEN airline_name LIKE '%JetBlue%'     THEN 'B6'
+    WHEN airline_name LIKE '%Alaska%'      THEN 'AS'
+    WHEN airline_name LIKE '%Spirit%'      THEN 'NK'
+    WHEN airline_name LIKE '%Frontier%'    THEN 'F9'
+    WHEN airline_name LIKE '%Hawaiian%'    THEN 'HA'
+    WHEN airline_name LIKE '%SkyWest%'     THEN 'OO'
+    WHEN airline_name LIKE '%Republic%'    THEN 'YX'
+    WHEN airline_name LIKE '%Endeavor%'    THEN '9E'
+    WHEN airline_name LIKE '%PSA%'         THEN 'OH'
+    WHEN airline_name LIKE '%Envoy%'       THEN 'MQ'
+    WHEN airline_name LIKE '%Mesa%'        THEN 'YV'
+    WHEN airline_name LIKE '%ExpressJet%'  THEN 'EV'
+    WHEN airline_name LIKE '%Air Wisconsin%' THEN 'ZW'
+    ELSE airline_code
+  END;
+
+CREATE INDEX IF NOT EXISTS idx_cancelled_key
+ON cancelled_2023_clean (flight_date, origin, dest, airline_code);
+
+-- final integrate all 3 sources
+
+DROP TABLE IF EXISTS fact_flights_integrated;
+
+CREATE TABLE fact_flights_integrated AS
+SELECT
+    f.flight_id,
+    f.flight_date,
+    f.airline,
+    f.airline_code,
+    f.origin,
+    f.dest,
+    f.departure_delay,
+    f.arrival_delay,
+    f.cancelled_flag,
+
+    -- 2023 cancelled/diverted dataset
+    c.Cancelled       AS cancelled_2023_flag,
+    c.Diverted        AS diverted_2023_flag,
+    c.departure_delay AS dep_delay_2023,
+    c.arrival_delay   AS arr_delay_2023,
+
+    -- Weather enrichment (origin airport + day)
+    w.avg_temp,
+    w.avg_wind,
+    w.avg_vis,
+    w.total_precip
+
+FROM flights_clean f
+
+LEFT JOIN cancelled_2023_clean c
+  ON  f.flight_date  = c.flight_date
+  AND f.origin       = c.origin
+  AND f.dest         = c.dest
+  AND f.airline_code = c.airline_code
+
+LEFT JOIN weather_by_airport_day w
+  ON  f.flight_date = w.flight_date
+  AND f.origin      = w.airport;
+
+-- used to validate and return to safe updates 1 
+SELECT
+  (SELECT COUNT(*) FROM flights_clean) AS flights_rows,
+  (SELECT COUNT(*) FROM fact_flights_integrated) AS integrated_rows;
+
+SELECT
+  COUNT(*) AS fact_rows,
+  SUM(avg_temp IS NOT NULL) AS rows_with_weather,
+  SUM(cancelled_2023_flag IS NOT NULL) AS rows_with_cancelled_2023
+FROM fact_flights_integrated;
+
+SET SQL_SAFE_UPDATES = 1;
