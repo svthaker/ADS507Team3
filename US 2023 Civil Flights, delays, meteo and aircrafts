@@ -1,12 +1,5 @@
--- ================================
--- Cancelled/Diverted Dataset Setup
--- ================================
-
 USE flight_delay_project;
 
--- ------------------------------------------------------------
--- 1) STAGING TABLE (all TEXT so import is painless)
--- ------------------------------------------------------------
 DROP TABLE IF EXISTS cancelled_diverted_stage;
 
 CREATE TABLE cancelled_diverted_stage (
@@ -35,25 +28,17 @@ CREATE TABLE cancelled_diverted_stage (
   Delay_LastAircraft TEXT
 );
 
--- ------------------------------------------------------------
--- 2) LOAD CSV INTO STAGING
--- ------------------------------------------------------------
 TRUNCATE TABLE cancelled_diverted_stage;
 
--- 🔁 REPLACE THIS PATH WITH YOUR CSV PATH
 LOAD DATA LOCAL INFILE 'C:/Users/shrey/Downloads/Cancelled_Diverted_Dataset.csv'
 INTO TABLE cancelled_diverted_stage
 FIELDS TERMINATED BY ','
 ENCLOSED BY '"'
-LINES TERMINATED BY '\n'
+LINES TERMINATED BY '\r\n'
 IGNORE 1 ROWS;
 
--- Quick check: staging row count
 SELECT COUNT(*) AS stage_rows FROM cancelled_diverted_stage;
 
--- ------------------------------------------------------------
--- 3) CLEAN TABLE (typed columns for analysis)
--- ------------------------------------------------------------
 DROP TABLE IF EXISTS cancelled_diverted_clean;
 
 CREATE TABLE cancelled_diverted_clean (
@@ -82,61 +67,41 @@ CREATE TABLE cancelled_diverted_clean (
   delay_lastaircraft DECIMAL(10,2)
 );
 
--- ------------------------------------------------------------
--- 4) INSERT CLEANED DATA (staging -> clean)
--- ------------------------------------------------------------
 TRUNCATE TABLE cancelled_diverted_clean;
 
 INSERT INTO cancelled_diverted_clean
 SELECT
-  -- Date in your CSV is like 1/25/2023, so use %c/%e/%Y
   STR_TO_DATE(NULLIF(TRIM(FlightDate), ''), '%c/%e/%Y') AS flight_date,
-
   CAST(NULLIF(TRIM(Day_Of_Week), '') AS UNSIGNED) AS day_of_week,
-
   NULLIF(TRIM(Airline), '') AS airline,
   NULLIF(TRIM(Tail_Number), '') AS tail_number,
-
   CAST(NULLIF(SUBSTRING_INDEX(TRIM(Cancelled), '.', 1), '') AS UNSIGNED) AS cancelled,
   CAST(NULLIF(SUBSTRING_INDEX(TRIM(Diverted),  '.', 1), '') AS UNSIGNED) AS diverted,
-
   NULLIF(TRIM(Dep_Airport), '') AS dep_airport,
   NULLIF(TRIM(Dep_CityName), '') AS dep_cityname,
   NULLIF(TRIM(DepTime_label), '') AS deptime_label,
-
   CASE
     WHEN TRIM(Dep_Delay) REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Dep_Delay) AS DECIMAL(10,2))
     ELSE NULL
   END AS dep_delay,
-
   NULLIF(TRIM(Dep_Delay_Tag), '') AS dep_delay_tag,
   NULLIF(TRIM(Dep_Delay_Type), '') AS dep_delay_type,
-
   NULLIF(TRIM(Arr_Airport), '') AS arr_airport,
   NULLIF(TRIM(Arr_CityName), '') AS arr_cityname,
-
   CASE
     WHEN TRIM(Arr_Delay) REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Arr_Delay) AS DECIMAL(10,2))
     ELSE NULL
   END AS arr_delay,
-
   NULLIF(TRIM(Arr_Delay_Type), '') AS arr_delay_type,
-
   CAST(NULLIF(SUBSTRING_INDEX(TRIM(Flight_Duration), '.', 1), '') AS UNSIGNED) AS flight_duration,
-
   NULLIF(TRIM(Distance_type), '') AS distance_type,
-
   CASE WHEN TRIM(Delay_Carrier)  REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Delay_Carrier)  AS DECIMAL(10,2)) ELSE NULL END,
   CASE WHEN TRIM(Delay_Weather)  REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Delay_Weather)  AS DECIMAL(10,2)) ELSE NULL END,
   CASE WHEN TRIM(Delay_NAS)      REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Delay_NAS)      AS DECIMAL(10,2)) ELSE NULL END,
   CASE WHEN TRIM(Delay_Security) REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Delay_Security) AS DECIMAL(10,2)) ELSE NULL END,
   CASE WHEN TRIM(Delay_LastAircraft) REGEXP '^-?[0-9]+(\\.[0-9]+)?$' THEN CAST(TRIM(Delay_LastAircraft) AS DECIMAL(10,2)) ELSE NULL END
-
 FROM cancelled_diverted_stage;
 
--- ------------------------------------------------------------
--- 5) QUICK VALIDATION QUERIES
--- ------------------------------------------------------------
 SELECT COUNT(*) AS clean_rows FROM cancelled_diverted_clean;
 
 SELECT
@@ -145,16 +110,32 @@ SELECT
 FROM cancelled_diverted_clean;
 
 SELECT
+  COUNT(*) AS total_rows,
+  SUM(flight_date IS NULL) AS bad_date_rows
+FROM cancelled_diverted_clean;
+
+SELECT
   SUM(CASE WHEN flight_date IS NULL THEN 1 ELSE 0 END) AS flight_date_nulls,
   SUM(CASE WHEN dep_delay    IS NULL THEN 1 ELSE 0 END) AS dep_delay_nulls,
   SUM(CASE WHEN arr_delay    IS NULL THEN 1 ELSE 0 END) AS arr_delay_nulls
 FROM cancelled_diverted_clean;
 
--- ------------------------------------------------------------
--- 6) INDEXES (help joins/filters later)
--- ------------------------------------------------------------
+DROP INDEX idx_cd_flight_date ON cancelled_diverted_clean;
+DROP INDEX idx_cd_airline     ON cancelled_diverted_clean;
+DROP INDEX idx_cd_dep_airport ON cancelled_diverted_clean;
+DROP INDEX idx_cd_arr_airport ON cancelled_diverted_clean;
+
 CREATE INDEX idx_cd_flight_date ON cancelled_diverted_clean (flight_date);
 CREATE INDEX idx_cd_airline     ON cancelled_diverted_clean (airline);
 CREATE INDEX idx_cd_dep_airport ON cancelled_diverted_clean (dep_airport);
 CREATE INDEX idx_cd_arr_airport ON cancelled_diverted_clean (arr_airport);
+
+CREATE OR REPLACE VIEW vw_cancelled_diverted_by_airport AS
+SELECT
+  dep_airport,
+  COUNT(*) AS total_flights,
+  SUM(cancelled = 1) AS cancelled_flights,
+  SUM(diverted = 1) AS diverted_flights
+FROM cancelled_diverted_clean
+GROUP BY dep_airport;
 
