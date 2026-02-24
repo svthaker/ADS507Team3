@@ -183,6 +183,12 @@ Analytical Views
 ## Team Members
 
 - Shivam Patel
-- Brianna Sanchez  
+- Brianna Sanchez
+- Shrey Thaker
+
+---
+
+## Used ChatGPT to write original code to provide guidance, rewrite original code to solve for errors, and provide explanations.
+  
 - Shrey Thaker
 - ADS 507 – Team 3
