@@ -189,6 +189,5 @@ Analytical Views
 ---
 
 ## Used ChatGPT to write original code to provide guidance, rewrite original code to solve for errors, and provide explanations.
-  
-- Shrey Thaker
+
 - ADS 507 – Team 3
